@@ -1,0 +1,20 @@
+[Unit]
+Description=Taparr - LTO Tape Archival & Catalog Manager for Sonarr/Radarr/Plex
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taparr
+Group=tape
+SupplementaryGroups=disk video
+WorkingDirectory=/opt/taparr
+Environment="TAPARR_CONFIG=/etc/taparr/config.yaml"
+ExecStart=/opt/taparr/.venv/bin/uvicorn taparr.main:app --host 0.0.0.0 --port 8686
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+

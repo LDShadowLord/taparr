@@ -1,0 +1,21 @@
+# Taparr Minimal Bootstrap Configuration
+# Copy to /etc/taparr/config.yaml or ./config.yaml
+# All other settings (Sonarr/Radarr, Plex, Drives, Scratch, Power Hooks, Pools, Notifications)
+# are stored in the database and configured inside the Taparr WebUI.
+
+server:
+  host: "0.0.0.0"
+  port: 8686
+  log_level: "info"
+
+database:
+  # Primary PostgreSQL connection URL (SQLAlchemy 2.0 + psycopg3)
+  url: "postgresql+psycopg://taparr:taparr@localhost:5432/taparr"
+  # For local testing/CI without a running PostgreSQL server, sqlite:///./data/taparr.db is also supported
+  pool_size: 10
+  max_overflow: 20
+
+paths:
+  # Default local data directory for virtual simulator state, logs, and default backups
+  data_dir: "./data"
+

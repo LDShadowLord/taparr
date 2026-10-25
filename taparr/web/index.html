@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taparr — LTO Tape Archival & Catalog Manager</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Sidebar (*arr Homage) -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">📼</div>
+        <div>
+          <div class="brand-title">Taparr</div>
+          <div class="brand-sub" id="sidebar-version">v0.1.0 • fmt v1</div>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <span>📊</span> Dashboard
+        </button>
+        <button class="nav-item" data-tab="media">
+          <span>🎬</span> Media Library
+        </button>
+        <button class="nav-item" data-tab="msl4048">
+          <span>🗄️</span> HP MSL4048 Rack
+        </button>
+        <button class="nav-item" data-tab="tapes">
+          <span>📼</span> Tapes & Pools
+        </button>
+        <button class="nav-item" data-tab="jobs">
+          <span>⚡</span> Queue & Jobs
+        </button>
+        <button class="nav-item" data-tab="catalog">
+          <span>🔍</span> Catalog & Recovery
+        </button>
+        <button class="nav-item" data-tab="settings">
+          <span>⚙️</span> Settings
+        </button>
+        <button class="nav-item" data-tab="updates">
+          <span>🔄</span> System & Changelog
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="power-widget">
+          <div class="power-header">
+            <span>MSL4048 Power</span>
+            <span id="power-badge" class="badge badge-success">ONLINE</span>
+          </div>
+          <div class="power-actions">
+            <button class="btn btn-xs btn-secondary" onclick="window.taparrApp.powerOn()">Wake</button>
+            <button class="btn btn-xs btn-danger" onclick="window.taparrApp.powerOff()">Sleep</button>
+            <button class="btn btn-xs btn-outline" id="maint-lock-btn" onclick="window.taparrApp.toggleMaintLock()">Lock: OFF</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="page-title">Dashboard</h1>
+          <span id="sim-mode-pill" class="badge badge-warning">VIRTUAL MSL4048 SIMULATOR</span>
+        </div>
+        <div class="topbar-right">
+          <button class="btn btn-sm btn-primary" onclick="window.taparrApp.runArchiveBatch()">
+            ▶ Flush Archive Queue
+          </button>
+          <button class="btn btn-sm btn-accent" onclick="window.taparrApp.runRestoreBatch()">
+            ◀ Run Single-Pass Restore
+          </button>
+          <button class="btn btn-sm btn-secondary" onclick="window.taparrApp.refreshAll()">
+            ↻ Refresh
+          </button>
+        </div>
+      </header>
+
+      <div id="toast-container" class="toast-container"></div>
+
+      <!-- TAB 1: DASHBOARD -->
+      <section id="tab-dashboard" class="tab-pane active">
+        <div class="stats-grid" id="dashboard-stats"></div>
+
+        <div class="grid-2col">
+          <div class="card">
+            <div class="card-header">
+              <h3>LTO Tape Drives (LTO-1 .. LTO-10 / LA Ready)</h3>
+            </div>
+            <div id="dashboard-drives" class="drives-list"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Local SSD Scratch Pipeline & Active Pools</h3>
+            </div>
+            <div id="dashboard-scratch"></div>
+            <hr class="divider" />
+            <div id="dashboard-pools"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>LTO Generation Matrix (LTO-1 through LTO-10 / LA)</h3>
+          </div>
+          <div class="table-wrap" id="lto-matrix-table"></div>
+        </div>
+      </section>
+
+      <!-- TAB 2: MEDIA LIBRARY -->
+      <section id="tab-media" class="tab-pane">
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <input type="text" id="media-search" class="input" placeholder="Filter Movies, TV Seasons, Anime..." oninput="window.taparrApp.loadMedia()" />
+            <select id="media-cat-filter" class="input" onchange="window.taparrApp.loadMedia()">
+              <option value="">All Categories</option>
+              <option value="Movies">Movies</option>
+              <option value="TV Shows">TV Shows</option>
+              <option value="Anime">Anime</option>
+              <option value="Unmanaged">Unmanaged</option>
+            </select>
+            <select id="media-status-filter" class="input" onchange="window.taparrApp.loadMedia()">
+              <option value="">All Statuses</option>
+              <option value="ON_DISK">On Disk</option>
+              <option value="QUEUED_ARCHIVE">Queued for Tape</option>
+              <option value="ON_TAPE_STUBBED">On Tape (.mkv Stub on Disk)</option>
+              <option value="ON_TAPE_ONLY">On Tape (Deleted from Disk)</option>
+              <option value="QUEUED_RESTORE">Queued for Restore</option>
+              <option value="ON_DISK_AND_TAPE">Restored (On Disk + On Tape)</option>
+            </select>
+          </div>
+          <div class="toolbar-group">
+            <button class="btn btn-sm btn-secondary" onclick="window.taparrApp.seedDemoMedia()">
+              + Load Demo Media
+            </button>
+            <button class="btn btn-sm btn-primary" onclick="window.taparrApp.queueSelectedForArchive()">
+              📼 Queue Selected for Tape
+            </button>
+            <button class="btn btn-sm btn-accent" onclick="window.taparrApp.queueSelectedForRestore()">
+              ♻ Queue Selected for Restore
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="media-select-all" onchange="window.taparrApp.toggleAllMedia(this)" /></th>
+                  <th>Title</th>
+                  <th>Category</th>
+                  <th>Size</th>
+                  <th>Target Pool</th>
+                  <th>Status</th>
+                  <th>Tape / Filemark</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="media-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: HP MSL4048 48-SLOT RACK VISUALIZER -->
+      <section id="tab-msl4048" class="tab-pane">
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <button class="btn btn-sm btn-primary" onclick="window.taparrApp.runInventory()">
+              🔍 Run mtx Barcode Inventory Scan (48 Slots)
+            </button>
+          </div>
+          <div class="legend-group">
+            <span class="badge badge-info">Movies / TV / Anime</span>
+            <span class="badge badge-neutral">Unassigned</span>
+            <span class="badge badge-danger">🔒 Used By Other (Locked)</span>
+            <span class="badge badge-warning">Mailslot (I/E 46-48)</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>HP MSL4048 48-Slot Magazine Map (Left Magazine: Slots 1–24 • Right Magazine: Slots 25–48)</h3>
+          </div>
+          <div id="msl4048-rack-grid" class="rack-grid"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Offsite / Vaulted Cartridges (Ejected from MSL4048)</h3>
+          </div>
+          <div id="vault-tapes-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB 4: TAPES & POOLS -->
+      <section id="tab-tapes" class="tab-pane">
+        <div class="grid-2col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Tape Pools (System & Custom)</h3>
+            </div>
+            <div id="pools-table-wrap"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Create Custom Pool / Register Cartridge</h3>
+            </div>
+            <div class="form-row">
+              <input type="text" id="new-pool-name" class="input" placeholder="New Pool Name (e.g. 4K Remux)" />
+              <input type="color" id="new-pool-color" class="input-color" value="#10b981" />
+              <button class="btn btn-sm btn-primary" onclick="window.taparrApp.createPool()">Add Pool</button>
+            </div>
+            <hr class="divider" />
+            <div class="form-row">
+              <input type="text" id="new-tape-barcode" class="input" placeholder="Barcode (e.g. MOV005L5, ARC01LA, BKP99L6)" />
+              <input type="number" id="new-tape-slot" class="input" placeholder="Slot # (1-48)" style="width:120px" />
+              <button class="btn btn-sm btn-secondary" onclick="window.taparrApp.registerTape()">Add Cartridge</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Cartridge Inventory & Lifecycle Actions (fm0 Header, Close Tape, Clone, Compact)</h3>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Barcode</th>
+                  <th>Gen</th>
+                  <th>Pool</th>
+                  <th>Status</th>
+                  <th>Location</th>
+                  <th>Used / Capacity</th>
+                  <th>Dead %</th>
+                  <th>Filemarks</th>
+                  <th>Written By</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tapes-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="tape-inspector-card" style="display:none;">
+          <div class="card-header">
+            <h3 id="inspector-title">Tape Inspector</h3>
+          </div>
+          <pre id="inspector-output" class="code-block"></pre>
+        </div>
+      </section>
+
+      <!-- TAB 5: QUEUE & JOBS -->
+      <section id="tab-jobs" class="tab-pane">
+        <div class="card">
+          <div class="card-header">
+            <h3>Batch Jobs & Live Tape Streaming Telemetry</h3>
+          </div>
+          <div id="jobs-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB 6: CATALOG & DISASTER RECOVERY -->
+      <section id="tab-catalog" class="tab-pane">
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <input type="text" id="catalog-search-q" class="input" placeholder="Search file path, movie/show title, or barcode..." oninput="window.taparrApp.searchCatalog()" />
+            <input type="text" id="catalog-barcode-q" class="input" placeholder="Filter Barcode (e.g. MOV001L5)" style="width:190px" oninput="window.taparrApp.searchCatalog()" />
+          </div>
+          <div class="toolbar-group">
+            <button class="btn btn-sm btn-primary" onclick="window.taparrApp.exportCatalogBackup()">
+              💾 Export Disaster Recovery Bundle Now
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>On-Tape File Catalog (With Bare-Metal `mt` + `tar` Recovery Commands)</h3>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Tape</th>
+                  <th>Clone</th>
+                  <th>Pool</th>
+                  <th>FM #</th>
+                  <th>Block Offset</th>
+                  <th>Title / Relative Path</th>
+                  <th>Size</th>
+                  <th>SHA-256</th>
+                  <th>Taparr Ver</th>
+                  <th>Bare-Metal Command</th>
+                </tr>
+              </thead>
+              <tbody id="catalog-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Generated Disaster Recovery Bundles (`catalog-files.csv`, `RECOVERY.md`, `recover-bare.sh`, `pg_dump`)</h3>
+          </div>
+          <div id="backups-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB 7: SETTINGS -->
+      <section id="tab-settings" class="tab-pane">
+        <div class="grid-2col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Hardware, Scratch SSD & Disk Stub Settings</h3>
+            </div>
+            <div id="settings-hardware-form"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>MSL4048 Power Webhooks & Plex / Notifications</h3>
+            </div>
+            <div id="settings-power-form"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Sonarr & Radarr Instances (Multi-Instance TV / Anime / Movies)</h3>
+          </div>
+          <div class="form-row">
+            <input type="text" id="arr-name" class="input" placeholder="Name (e.g. Sonarr - Anime)" />
+            <select id="arr-type" class="input" style="width:130px">
+              <option value="sonarr">Sonarr</option>
+              <option value="radarr">Radarr</option>
+            </select>
+            <input type="text" id="arr-url" class="input" placeholder="http://sonarr:8989" />
+            <input type="text" id="arr-key" class="input" placeholder="API Key" />
+            <button class="btn btn-sm btn-primary" onclick="window.taparrApp.addArrInstance()">+ Add Instance</button>
+          </div>
+          <div id="arr-instances-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB 8: SYSTEM UPDATES & CHANGELOG -->
+      <section id="tab-updates" class="tab-pane">
+        <div class="grid-2col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Seamless In-WebUI Updater (`scripts/update.sh`)</h3>
+            </div>
+            <div id="updater-status-box"></div>
+            <div class="toolbar-group" style="margin-top:12px;">
+              <button class="btn btn-sm btn-secondary" onclick="window.taparrApp.runUpdate(true)">
+                🧪 Test Update (Dry Run)
+              </button>
+              <button class="btn btn-sm btn-primary" onclick="window.taparrApp.runUpdate(false)">
+                🚀 Run Seamless Update Now
+              </button>
+            </div>
+            <pre id="updater-log-output" class="code-block" style="margin-top:12px;display:none;"></pre>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Versioned Tape Header Compatibility</h3>
+            </div>
+            <p class="muted-text">
+              Every cartridge initialized by Taparr writes a 1 KB JSON/text descriptor at <code>Filemark 0 (fm0)</code>
+              containing both <code>taparr_version</code> and <code>tape_format_version</code>. When future updates introduce
+              new manifest fields or blocking capabilities, Taparr automatically inspects <code>fm0</code> to preserve backward compatibility.
+            </p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Release Changelog (`CHANGELOG.md`)</h3>
+          </div>
+          <div id="changelog-releases"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
