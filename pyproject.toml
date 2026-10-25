@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taparr"
-version = "0.1.0"
+version = "0.2.0"
 description = "LTO Tape Archival & Catalog Manager for Sonarr, Radarr, and Plex on HP MSL4048"
 readme = "README.md"
 requires-python = ">=3.11"

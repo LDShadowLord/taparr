@@ -5,7 +5,7 @@ Supports LTO-1 (L1) through LTO-10 (LA) media and drives on the HP MSL4048.
 
 from typing import Dict, Any
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 TAPE_FORMAT_VERSION = 1
 TAPE_HEADER_MAGIC = "TAPARR_TAPE_HEADER"
 

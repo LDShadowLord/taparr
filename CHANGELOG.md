@@ -5,6 +5,23 @@ All notable changes to **Taparr** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-25
+
+### Added
+- **Full Physical SCSI Hardware Execution (`mtx`, `mt-st`, `tar`, `mbuffer`, `sg_logs`)**:
+  - Real hardware block position reading via `mt -f /dev/nstX tell` / `status`.
+  - Physical `/dev/nstX` TAR streaming for trailing self-describing manifests (`write_trailing_manifest`).
+  - Physical drive-to-drive `mbuffer` / `dd` filemark streaming for **Tape Cloning** and **Dual-Drive Tape Compaction**.
+  - Physical SCSI **TapeAlert (`sg_logs -p 0x2e`)** health & cleaning-required detection plus automated **Drive Cleaning (`clean_drive`)** with `CU` cleaning cartridges.
+- **Production PostgreSQL & Portable SQL Dump Engine**:
+  - Live database engine telemetry (`PostgreSQL` vs `SQLite fallback`, server version, pool metrics, row counts) in Dashboard & Settings.
+  - Configurable `strict_postgres` mode in `config.yaml` alongside native `pg_dump` + pure-SQLAlchemy portable PostgreSQL SQL `INSERT` dump generation (`taparr-pgdump.sql`).
+- **Background Worker & Idle Auto-Shutdown Loop**:
+  - Non-blocking background job execution option for multi-hour LTO tape batches, periodic Sonarr/Radarr `to-tape` tag polling, and automatic MSL4048 idle cooldown power-off.
+- **Expanded WebUI Controls**:
+  - Direct browser download of Disaster Recovery Catalog Backup files (`catalog-files.csv`, `catalog-files.json`, `RECOVERY.md`, `recover-bare.sh`, `taparr-pgdump.sql`).
+  - WebUI forms for toggling Physical SCSI vs. Virtual Simulator mode, configuring `/dev/tape/by-id/...` drive paths & LTO-1..LTO-10 generations, editing pool regex/thresholds, and adding unmanaged folders.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

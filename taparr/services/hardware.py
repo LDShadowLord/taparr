@@ -527,8 +527,8 @@ class MSL4048HardwareManager:
         pool = self.db.get(TapePool, tape.pool_id)
         pool_name = pool.name if pool else "Unassigned"
 
-        # Calculate deterministic block offset (in 512-byte tar records)
-        block_offset = 2 + int(tape.used_bytes // 512)
+        # Calculate block offset (reads hardware `mt tell` on physical drives, or deterministic 512-byte offset in sim)
+        block_offset = self.read_hardware_block_position(drive, tape.used_bytes)
         total_bytes = sum(f["size_bytes"] for f in file_manifest)
         spec = get_media_spec(tape.media_code)
         drive.status = "WRITING"
@@ -550,12 +550,15 @@ class MSL4048HardwareManager:
             # Physical SCSI tape positioning and streaming via tar + mbuffer
             subprocess.run(["mt", "-f", drive.device_path, "rewind"], check=True, timeout=180)
             subprocess.run(["mt", "-f", drive.device_path, "fsf", str(next_fm)], check=True, timeout=300)
+            block_offset = self.read_hardware_block_position(drive, tape.used_bytes)
             mbuf_mb = int(self.hw_settings.get("mbuffer_size_mb", 512))
             cmd = (
                 f"tar -b {block_factor} -cf - -C {shlex_quote(str(staged_dir))} . "
                 f"| mbuffer -m {mbuf_mb}M -P 80 -o {shlex_quote(drive.device_path)}"
             )
             subprocess.run(["bash", "-o", "pipefail", "-c", cmd], check=True)
+            subprocess.run(["mt", "-f", drive.device_path, "weof", "1"], check=False, timeout=60)
+            self.check_drive_tape_alerts(drive)
             archive_sha256 = hashlib.sha256(
                 "|".join(f"{f['relative_path']}:{f['sha256_hash']}" for f in file_manifest).encode()
             ).hexdigest()
@@ -757,9 +760,45 @@ class MSL4048HardwareManager:
                     tf.addfile(ti, io.BytesIO(bdata))
             # Also save readable copy in sim dir for quick inspection
             (sim_dir / "latest-manifest.json").write_bytes(json_bytes)
+            block_offset = 2 + int(tape.used_bytes // 512)
+        else:
+            # Physical SCSI write of trailing self-describing manifest TAR at `manifest_fm_num`
+            active_drive = drive or self.db.scalar(
+                select(TapeDrive).where(TapeDrive.loaded_barcode == tape.barcode)
+            )
+            if active_drive:
+                subprocess.run(["mt", "-f", active_drive.device_path, "rewind"], check=True, timeout=180)
+                subprocess.run(
+                    ["mt", "-f", active_drive.device_path, "fsf", str(manifest_fm_num)],
+                    check=True,
+                    timeout=300,
+                )
+                block_offset = self.read_hardware_block_position(active_drive, tape.used_bytes)
+                tar_buf = io.BytesIO()
+                with tarfile.open(
+                    fileobj=tar_buf, mode="w", format=tarfile.PAX_FORMAT, bufsize=tape.tar_block_factor * 512
+                ) as tf:
+                    for name, bdata in [
+                        ("tape-manifest.json", json_bytes),
+                        ("tape-manifest.csv", csv_bytes),
+                        ("RECOVERY.txt", recovery_txt),
+                    ]:
+                        ti = tarfile.TarInfo(name=name)
+                        ti.size = len(bdata)
+                        ti.mtime = int(datetime.now(timezone.utc).timestamp())
+                        tf.addfile(ti, io.BytesIO(bdata))
+                raw_tar = tar_buf.getvalue()
+                block_size = tape.tar_block_factor * 512
+                remainder = len(raw_tar) % block_size
+                if remainder:
+                    raw_tar += b"\x00" * (block_size - remainder)
+                with open(active_drive.device_path, "wb") as dev_f:
+                    dev_f.write(raw_tar)
+                subprocess.run(["mt", "-f", active_drive.device_path, "weof", "1"], check=True, timeout=60)
+            else:
+                block_offset = 2 + int(tape.used_bytes // 512)
 
         manifest_sha = hashlib.sha256(json_bytes).hexdigest()
-        block_offset = 2 + int(tape.used_bytes // 512)
         manifest_rec = TapeFilemark(
             tape_id=tape.id,
             tape_barcode=tape.barcode,
@@ -861,6 +900,16 @@ class MSL4048HardwareManager:
             dst_dir = self.get_tape_sim_dir(target_tape.barcode)
             for p in sorted(src_dir.glob("fm*.tar")):
                 shutil.copy2(p, dst_dir / p.name)
+        else:
+            # Physical drive-to-drive streaming across all media filemarks (fm1..fmN)
+            for fm_idx in range(1, source_tape.total_filemarks + 1):
+                self.stream_filemark_between_drives(
+                    src_drive=source_drive,
+                    dst_drive=target_drive,
+                    src_fm=fm_idx,
+                    dst_fm=fm_idx,
+                    block_factor=source_tape.tar_block_factor,
+                )
 
         # Replicate filemark metadata records for the cloned tape
         src_fms = self.db.scalars(
@@ -984,6 +1033,153 @@ class MSL4048HardwareManager:
         tape.vault_note = ""
         self.db.commit()
         return {"barcode": tape.barcode, "location_type": tape.location_type, "slot_number": slot}
+
+    def stream_filemark_between_drives(
+        self,
+        src_drive: TapeDrive,
+        dst_drive: TapeDrive,
+        src_fm: int,
+        dst_fm: int,
+        block_factor: int = 2048,
+    ) -> None:
+        """
+        Positions `src_drive` at `src_fm` and `dst_drive` at `dst_fm`, streams the raw TAR
+        filemark directly from `src_drive.device_path` to `dst_drive.device_path` using `mbuffer`
+        (or `dd` fallback), and writes a hardware EOF filemark on `dst_drive`.
+        """
+        subprocess.run(["mt", "-f", src_drive.device_path, "rewind"], check=True, timeout=180)
+        subprocess.run(["mt", "-f", src_drive.device_path, "fsf", str(src_fm)], check=True, timeout=300)
+        subprocess.run(["mt", "-f", dst_drive.device_path, "rewind"], check=True, timeout=180)
+        subprocess.run(["mt", "-f", dst_drive.device_path, "fsf", str(dst_fm)], check=True, timeout=300)
+
+        block_bytes = int(block_factor) * 512
+        mbuf_mb = int(self.hw_settings.get("mbuffer_size_mb", 512))
+        if shutil.which("mbuffer"):
+            cmd = (
+                f"mbuffer -s {block_bytes} -m {mbuf_mb}M "
+                f"-i {shlex_quote(src_drive.device_path)} -o {shlex_quote(dst_drive.device_path)}"
+            )
+            subprocess.run(["bash", "-o", "pipefail", "-c", cmd], check=True)
+        else:
+            subprocess.run(
+                [
+                    "dd",
+                    f"if={src_drive.device_path}",
+                    f"of={dst_drive.device_path}",
+                    f"bs={block_bytes}",
+                    "status=none",
+                ],
+                check=True,
+            )
+        subprocess.run(["mt", "-f", dst_drive.device_path, "weof", "1"], check=True, timeout=60)
+
+    def read_hardware_block_position(self, drive: TapeDrive, fallback_used_bytes: int = 0) -> int:
+        """
+        Queries `mt -f <dev> tell` or `mt -f <dev> status` on physical SCSI tape drives
+        to obtain the exact hardware block number on tape.
+        """
+        if self.sim_mode:
+            return 2 + int(fallback_used_bytes // 512)
+
+        for subcmd in ("tell", "status"):
+            res = subprocess.run(
+                ["mt", "-f", drive.device_path, subcmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout:
+                m = re.search(r"(?:At block|block number\s*=)\s*(\d+)", res.stdout, re.IGNORECASE)
+                if m:
+                    blk = int(m.group(1))
+                    drive.current_block = blk
+                    return blk
+        return 2 + int(fallback_used_bytes // 512)
+
+    def check_drive_tape_alerts(self, drive: TapeDrive) -> Dict[str, Any]:
+        """
+        Queries SCSI TapeAlert Log Page (`0x2e`) via `sg_logs -p 0x2e <device_path>`
+        to detect cleaning requests (`Clean now`, `Clean periodic`) or media/drive warnings.
+        """
+        if self.sim_mode or not shutil.which("sg_logs"):
+            return {
+                "drive_index": drive.drive_index,
+                "needs_cleaning": drive.needs_cleaning,
+                "alerts": [drive.tape_alert_Message] if drive.tape_alert_Message else [],
+            }
+
+        res = subprocess.run(
+            ["sg_logs", "-p", "0x2e", drive.device_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        active_alerts: List[str] = []
+        needs_clean = False
+        if res.returncode == 0 and res.stdout:
+            for line in res.stdout.splitlines():
+                if ": 1" in line or "= 1" in line:
+                    alert_name = line.split(":")[0].strip()
+                    active_alerts.append(alert_name)
+                    if "clean" in alert_name.lower():
+                        needs_clean = True
+
+        drive.needs_cleaning = needs_clean
+        drive.tape_alert_Message = "; ".join(active_alerts)[:500]
+        self.db.commit()
+        return {
+            "drive_index": drive.drive_index,
+            "needs_cleaning": drive.needs_cleaning,
+            "alerts": active_alerts,
+        }
+
+    def clean_drive(self, drive: TapeDrive) -> Dict[str, Any]:
+        """
+        Executes an automated LTO Drive Cleaning cycle using a `CU` (`CLN...`) cartridge
+        in the HP MSL4048 slots:
+          1. Unloads any currently loaded data cartridge from `drive`.
+          2. Locates a `CU` cleaning cartridge in `SLOT` location.
+          3. Loads the cleaning cartridge into `drive`, runs cleaning cycle, and unloads back to its slot.
+          4. Clears `drive.needs_cleaning` and `drive.tape_alert_Message`.
+        """
+        clean_tape = self.db.scalar(
+            select(Tape).where(Tape.media_code == "CU", Tape.location_type == "SLOT")
+        )
+        if not clean_tape:
+            raise RuntimeError("No Universal Cleaning Cartridge (CU / CLN) found in MSL4048 slots.")
+
+        if drive.loaded_barcode:
+            self.unload_drive(drive)
+
+        clean_slot = clean_tape.slot_number or 45
+        drive.status = "CLEANING"
+        self.db.commit()
+
+        if not self.sim_mode:
+            changer = self.hw_settings.get("changer_device", "/dev/sg2")
+            subprocess.run(
+                ["mtx", "-f", changer, "load", str(clean_slot), str(drive.drive_index)],
+                check=True,
+                timeout=240,
+            )
+            subprocess.run(
+                ["mtx", "-f", changer, "unload", str(clean_slot), str(drive.drive_index)],
+                check=True,
+                timeout=240,
+            )
+
+        drive.needs_cleaning = False
+        drive.tape_alert_Message = ""
+        drive.status = "IDLE"
+        self.db.commit()
+        return {
+            "status": "cleaned",
+            "drive_index": drive.drive_index,
+            "cleaning_barcode": clean_tape.barcode,
+            "slot_number": clean_slot,
+        }
 
     @staticmethod
     def _sha256_file(path: Path) -> str:

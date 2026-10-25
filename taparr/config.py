@@ -34,8 +34,10 @@ def load_bootstrap_config() -> Dict[str, Any]:
 
     default_db_url = os.environ.get(
         "TAPARR_DATABASE_URL",
-        database.get("url", f"sqlite:///{data_dir / 'taparr.db'}"),
+        database.get("url", "postgresql+psycopg://taparr:taparr@localhost:5432/taparr"),
     )
+    strict_pg_env = os.environ.get("TAPARR_STRICT_POSTGRES", "").lower() in ("1", "true", "yes")
+    strict_postgres = strict_pg_env or bool(database.get("strict_postgres", False))
 
     return {
         "server": {
@@ -45,6 +47,7 @@ def load_bootstrap_config() -> Dict[str, Any]:
         },
         "database": {
             "url": default_db_url,
+            "strict_postgres": strict_postgres,
             "pool_size": int(database.get("pool_size", 10)),
             "max_overflow": int(database.get("max_overflow", 20)),
         },

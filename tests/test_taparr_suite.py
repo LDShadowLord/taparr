@@ -337,3 +337,25 @@ def test_bin_packing_clone_compaction_power_and_updater(client: TestClient, tmp_
     assert "DRY RUN" in upd_res["log_output"]
     assert upd_res["pre_update_backup"].startswith("taparr-catalog-")
 
+    # Test Database Telemetry, PostgreSQL SQL dump download, Drive Clean (CLN), and TapeAlert check
+    db_telemetry = client.get("/api/v1/system/database").json()
+    assert db_telemetry["psycopg3_installed"] is True
+    assert db_telemetry["row_counts"]["tapes"] >= 10
+
+    sql_dl = client.get(
+        f"/api/v1/catalog/backups/{upd_res['pre_update_backup']}/download/taparr-pgdump.sql"
+    )
+    assert sql_dl.status_code == 200
+    assert "CREATE TABLE IF NOT EXISTS" in sql_dl.text
+    assert 'INSERT INTO "tape_pools"' in sql_dl.text
+
+    # Bring library back online and run Drive 0 Cleaning with CLN001CU
+    client.post("/api/v1/library/power/on")
+    clean_res = client.post("/api/v1/drives/0/clean").json()
+    assert clean_res["status"] == "cleaned"
+    assert clean_res["cleaning_barcode"] == "CLN001CU"
+
+    alerts_res = client.get("/api/v1/drives/0/alerts").json()
+    assert alerts_res["needs_cleaning"] is False
+
+

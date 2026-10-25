@@ -706,8 +706,16 @@ class TapeJobScheduler:
                 dst_tar = self.hw.get_tape_sim_dir(target_tape.barcode) / f"fm{new_fm_num:04d}.tar"
                 if src_tar.exists():
                     shutil.copy2(src_tar, dst_tar)
+            else:
+                self.hw.stream_filemark_between_drives(
+                    src_drive=src_drive,
+                    dst_drive=dst_drive,
+                    src_fm=old_fm.filemark_number,
+                    dst_fm=new_fm_num,
+                    block_factor=target_tape.tar_block_factor,
+                )
 
-            block_offset = 2 + int(target_tape.used_bytes // 512)
+            block_offset = self.hw.read_hardware_block_position(dst_drive, target_tape.used_bytes)
             new_fm = TapeFilemark(
                 tape_id=target_tape.id,
                 tape_barcode=target_tape.barcode,
@@ -760,6 +768,10 @@ class TapeJobScheduler:
 
         if self.hw.sim_mode:
             shutil.rmtree(self.hw.get_tape_sim_dir(source_tape.barcode), ignore_errors=True)
+        else:
+            import subprocess
+            subprocess.run(["mt", "-f", src_drive.device_path, "rewind"], check=False, timeout=180)
+            subprocess.run(["mt", "-f", src_drive.device_path, "weof", "2"], check=False, timeout=60)
 
         source_tape.status = "BLANK"
         source_tape.used_bytes = 0

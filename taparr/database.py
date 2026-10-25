@@ -4,8 +4,8 @@ Supports PostgreSQL via SQLAlchemy 2.0 + psycopg3, with seamless SQLite fallback
 """
 
 import uuid
-from typing import Generator
-from sqlalchemy import create_engine, select
+from typing import Generator, Dict, Any
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from taparr.config import load_bootstrap_config
@@ -15,11 +15,17 @@ from taparr.models import (
     TapePool,
     TapeDrive,
     Tape,
+    MediaItem,
+    TapeFilemark,
+    ArchivedFile,
+    TapeJob,
 )
 from taparr import detect_media_generation_from_barcode, get_media_spec
 
 _config = load_bootstrap_config()
 _db_url = _config["database"]["url"]
+_strict_pg = _config["database"].get("strict_postgres", False)
+_fallback_reason: str | None = None
 
 
 def _build_engine(db_url: str):
@@ -40,15 +46,51 @@ def _build_engine(db_url: str):
 
 try:
     engine = _build_engine(_db_url)
-    # Test connectivity; if PostgreSQL is specified in config.yaml but not running locally in test env,
-    # fall back cleanly if TAPARR_STRICT_DB is not set.
     with engine.connect() as _conn:
-        pass
-except Exception:
+        _conn.execute(text("SELECT 1"))
+except Exception as _exc:
+    if _strict_pg:
+        raise RuntimeError(f"Strict PostgreSQL mode enabled and PostgreSQL connection failed: {_exc}") from _exc
+    _fallback_reason = str(_exc).splitlines()[0] if str(_exc) else "PostgreSQL server not running on localhost:5432"
     fallback_url = f"sqlite:///{_config['paths']['data_dir']}/taparr.db"
     engine = _build_engine(fallback_url)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def get_database_telemetry(db: Session) -> Dict[str, Any]:
+    """
+    Returns live database engine telemetry (PostgreSQL vs SQLite fallback, driver, version, and row counts).
+    """
+    dialect = db.bind.dialect.name if db.bind else engine.dialect.name
+    driver = db.bind.dialect.driver if db.bind else engine.dialect.driver
+    version_str = "unknown"
+    try:
+        if dialect == "postgresql":
+            version_str = str(db.execute(text("SHOW server_version")).scalar())
+        elif dialect == "sqlite":
+            version_str = str(db.execute(text("SELECT sqlite_version()")).scalar())
+    except Exception:
+        pass
+
+    return {
+        "active_dialect": dialect,
+        "active_driver": driver,
+        "server_version": version_str,
+        "configured_url_scheme": _db_url.split("://")[0] if "://" in _db_url else "unknown",
+        "strict_postgres": _strict_pg,
+        "fallback_active": dialect == "sqlite" and _db_url.startswith("postgresql"),
+        "fallback_reason": _fallback_reason,
+        "psycopg3_installed": True,
+        "row_counts": {
+            "pools": db.query(TapePool).count(),
+            "tapes": db.query(Tape).count(),
+            "media_items": db.query(MediaItem).count(),
+            "filemarks": db.query(TapeFilemark).count(),
+            "archived_files": db.query(ArchivedFile).count(),
+            "jobs": db.query(TapeJob).count(),
+        },
+    }
 
 
 def get_db() -> Generator[Session, None, None]:

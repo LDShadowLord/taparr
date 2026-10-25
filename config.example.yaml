@@ -11,7 +11,8 @@ server:
 database:
   # Primary PostgreSQL connection URL (SQLAlchemy 2.0 + psycopg3)
   url: "postgresql+psycopg://taparr:taparr@localhost:5432/taparr"
-  # For local testing/CI without a running PostgreSQL server, sqlite:///./data/taparr.db is also supported
+  # Set strict_postgres: true in production so Taparr never falls back to SQLite if Postgres is down
+  strict_postgres: false
   pool_size: 10
   max_overflow: 20
 

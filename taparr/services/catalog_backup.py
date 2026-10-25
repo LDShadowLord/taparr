@@ -303,11 +303,30 @@ class CatalogBackupExporter:
                     )
         return results
 
+    def resolve_backup_file_path(self, bundle_name: str, filename: str) -> Path:
+        """
+        Safely resolves a file inside a backup bundle for direct WebUI download.
+        """
+        if "/" in bundle_name or ".." in bundle_name or "/" in filename or ".." in filename:
+            raise ValueError("Invalid bundle or file name.")
+        backup_dirs = self.cfg.get("backup_dirs") or [self.bootstrap["paths"]["backup_dir"]]
+        for b_root_str in backup_dirs:
+            candidate = Path(b_root_str).resolve() / bundle_name / filename
+            if candidate.is_file():
+                return candidate
+        raise FileNotFoundError(f"File '{filename}' not found in backup bundle '{bundle_name}'.")
+
     def _export_db_dump(self, bundle_dir: Path) -> None:
+        from sqlalchemy.schema import CreateTable
+        from sqlalchemy.dialects import postgresql
+        from taparr.models import Base
+
         db_url = self.bootstrap["database"]["url"]
         dump_path = bundle_dir / "taparr-pgdump.sql"
         pg_dump_bin = shutil.which("pg_dump")
-        if db_url.startswith("postgresql") and pg_dump_bin:
+        dialect = self.db.bind.dialect.name if self.db.bind else "sqlite"
+
+        if dialect == "postgresql" and pg_dump_bin:
             clean_url = db_url.replace("postgresql+psycopg://", "postgresql://")
             res = subprocess.run(
                 [pg_dump_bin, "--dbname", clean_url, "--file", str(dump_path)],
@@ -319,13 +338,38 @@ class CatalogBackupExporter:
             if res.returncode == 0 and dump_path.exists():
                 return
 
-        # Portable SQL comment + JSON dump header if pg_dump was not invoked
-        dump_path.write_text(
-            f"-- Taparr Database Portable Snapshot (Taparr v{__version__}, Format v{TAPE_FORMAT_VERSION})\n"
-            f"-- Generated at {datetime.now(timezone.utc).isoformat()}\n"
-            f"-- See catalog-files.json and tapes-inventory.json in this bundle for complete table records.\n",
-            encoding="utf-8",
-        )
+        # Generate a complete PostgreSQL-compatible DDL + INSERT SQL dump from SQLAlchemy tables
+        pg_dialect = postgresql.dialect()
+        lines = [
+            f"-- Taparr PostgreSQL Database Dump (Taparr v{__version__}, Format v{TAPE_FORMAT_VERSION})",
+            f"-- Generated at {datetime.now(timezone.utc).isoformat()}",
+            "BEGIN;",
+            "",
+        ]
+        for table in Base.metadata.sorted_tables:
+            ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=pg_dialect)).strip()
+            lines.append(f"{ddl};")
+            rows = self.db.execute(select(table)).mappings().all()
+            for r in rows:
+                cols = ", ".join(f'"{k}"' for k in r.keys())
+                vals = []
+                for v in r.values():
+                    if v is None:
+                        vals.append("NULL")
+                    elif isinstance(v, bool):
+                        vals.append("TRUE" if v else "FALSE")
+                    elif isinstance(v, (int, float)):
+                        vals.append(str(v))
+                    elif isinstance(v, (dict, list)):
+                        escaped = json.dumps(v).replace("'", "''")
+                        vals.append(f"'{escaped}'::jsonb")
+                    else:
+                        escaped = str(v).replace("'", "''")
+                        vals.append(f"'{escaped}'")
+                lines.append(f'INSERT INTO "{table.name}" ({cols}) VALUES ({", ".join(vals)});')
+            lines.append("")
+        lines.append("COMMIT;")
+        dump_path.write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def _rotate_old_backups(b_root: Path, retention: int) -> None:

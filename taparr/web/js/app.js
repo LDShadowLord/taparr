@@ -91,6 +91,13 @@ class TaparrApp {
     this._maintLocked = pwr.maintenance_lock;
 
     const s = d.summary;
+    const dbInfo = d.database || {};
+    const simPill = document.getElementById("sim-mode-pill");
+    if (simPill) {
+      simPill.textContent = d.library.simulator_mode ? "VIRTUAL MSL4048 SIMULATOR" : "PHYSICAL SCSI HARDWARE MODE";
+      simPill.className = `badge ${d.library.simulator_mode ? "badge-warning" : "badge-success"}`;
+    }
+
     document.getElementById("dashboard-stats").innerHTML = `
       <div class="stat-card">
         <div class="stat-label">Managed Cartridges</div>
@@ -108,9 +115,9 @@ class TaparrApp {
         <div class="stat-sub">${this.fmtBytes(s.media_archived_bytes)} on LTO tape</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Pending Queues</div>
-        <div class="stat-value">${s.queued_archive_count} 📼 / ${s.queued_restore_count} ♻</div>
-        <div class="stat-sub">${this.fmtBytes(s.queued_archive_bytes)} queued to write</div>
+        <div class="stat-label">Database Engine</div>
+        <div class="stat-value" style="text-transform:uppercase;">${dbInfo.active_dialect || "postgresql"}</div>
+        <div class="stat-sub">Driver: ${dbInfo.active_driver || "psycopg"} • v${dbInfo.server_version || ""}</div>
       </div>
     `;
 
@@ -128,6 +135,10 @@ class TaparrApp {
           <span>Status: <span class="badge ${drv.status === "IDLE" ? "badge-success" : "badge-warning"}">${drv.status}</span></span>
           <span>Loaded: <strong>${drv.loaded_barcode || "Empty"}</strong> (FM #${drv.current_filemark})</span>
           <span>${drv.speed_mbps} MB/s</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="btn btn-xs btn-secondary" onclick="window.taparrApp.cleanDrive(${drv.drive_index})">🧼 Run CLN Clean</button>
+          <button class="btn btn-xs btn-outline" onclick="window.taparrApp.checkDriveAlerts(${drv.drive_index})">🩺 Check TapeAlert (sg_logs)</button>
         </div>
       </div>
     `
@@ -700,13 +711,39 @@ class TaparrApp {
       <div class="drive-card">
         <div><strong>${b.name}</strong> <span class="muted-text">(${b.created_at})</span></div>
         <div class="muted-text" style="font-size:12px;">Path: <code>${b.path}</code></div>
-        <div style="margin-top:6px;">
-          ${b.files.map((f) => `<span class="badge badge-neutral" style="margin-right:6px;">${f}</span>`).join("")}
+        <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;">
+          ${b.files
+            .map(
+              (f) =>
+                `<a href="/api/v1/catalog/backups/${encodeURIComponent(b.name)}/download/${encodeURIComponent(
+                  f
+                )}" target="_blank" class="badge badge-info" style="text-decoration:none;">⬇ ${f}</a>`
+            )
+            .join("")}
         </div>
       </div>
     `
       )
       .join("");
+  }
+
+  async cleanDrive(driveIndex) {
+    try {
+      const res = await this.api(`/drives/${driveIndex}/clean`, { method: "POST" });
+      this.toast(`Drive ${driveIndex} cleaned using ${res.cleaning_barcode} (Slot #${res.slot_number})!`);
+      await this.loadDashboard();
+    } catch (e) {
+      this.toast(e.message);
+    }
+  }
+
+  async checkDriveAlerts(driveIndex) {
+    const res = await this.api(`/drives/${driveIndex}/alerts`);
+    if (res.needs_cleaning) {
+      this.toast(`Drive ${driveIndex} requests cleaning! Alerts: ${res.alerts.join(", ")}`);
+    } else {
+      this.toast(`Drive ${driveIndex} SCSI TapeAlert status healthy (no cleaning needed).`);
+    }
   }
 
   async loadSettings() {
@@ -715,6 +752,15 @@ class TaparrApp {
 
     document.getElementById("settings-hardware-form").innerHTML = `
       <div style="display:flex;flex-direction:column;gap:10px;font-size:13px;">
+        <label>Hardware Backend Mode:
+          <select id="cfg-sim-mode" class="input">
+            <option value="true" ${s.hardware.simulator_mode ? "selected" : ""}>Virtual MSL4048 Simulator (Safe Testing)</option>
+            <option value="false" ${!s.hardware.simulator_mode ? "selected" : ""}>Physical Linux SCSI Mode (mtx / mt-st / tar / mbuffer)</option>
+          </select>
+        </label>
+        <label>HP MSL4048 Changer Device (/dev/tape/by-id/...):
+          <input type="text" id="cfg-changer-dev" class="input" value="${s.hardware.changer_device || ""}" style="width:100%" />
+        </label>
         <label>Post-Archive Disk Action:
           <select id="cfg-post-mode" class="input">
             <option value="stub_mkv" ${s.disk_cleanup.post_archive_mode === "stub_mkv" ? "selected" : ""}>Playable .mkv Video Stub for Plex</option>
@@ -780,9 +826,14 @@ class TaparrApp {
     });
     await this.api("/settings/hardware", {
       method: "PUT",
-      body: JSON.stringify({ tar_block_factor: Number(document.getElementById("cfg-tar-bf").value) }),
+      body: JSON.stringify({
+        simulator_mode: document.getElementById("cfg-sim-mode").value === "true",
+        changer_device: document.getElementById("cfg-changer-dev").value,
+        tar_block_factor: Number(document.getElementById("cfg-tar-bf").value),
+      }),
     });
     this.toast("Hardware, SSD scratch, and stub settings saved.");
+    await this.loadDashboard();
   }
 
   async savePowerSettings() {

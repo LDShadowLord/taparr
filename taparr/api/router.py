@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
@@ -31,7 +32,7 @@ from taparr import (
     check_drive_media_compatibility,
 )
 from taparr.config import load_bootstrap_config
-from taparr.database import get_db, get_setting, update_setting, DEFAULT_SETTINGS
+from taparr.database import get_db, get_setting, update_setting, get_database_telemetry, DEFAULT_SETTINGS
 from taparr.models import (
     ArrInstance,
     TapePool,
@@ -54,6 +55,11 @@ from taparr.services.plex_client import PlexService
 from taparr.services.scheduler import TapeJobScheduler
 from taparr.services.catalog_backup import CatalogBackupExporter
 from taparr.services.updater import UpdateManager
+from taparr.services.background import (
+    spawn_background_job,
+    check_idle_cooldown_and_auto_power_off,
+    poll_all_arr_instances,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -137,10 +143,12 @@ class QueueRestoreRequest(BaseModel):
 class RunArchiveBatchRequest(BaseModel):
     pool_id: Optional[int] = None
     post_archive_mode: Optional[str] = None
+    run_in_background: bool = False
 
 
 class RunRestoreBatchRequest(BaseModel):
     remonitor_in_arr: bool = True
+    run_in_background: bool = False
 
 
 class ArrInstanceRequest(BaseModel):
@@ -213,6 +221,7 @@ def get_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "library": hw.get_library_state(),
         "scratch": scratch.get_scratch_telemetry(),
         "power": power.get_status(),
+        "database": get_database_telemetry(db),
         "recent_jobs": [_serialize_job(j) for j in jobs],
         "lto_matrix": {
             "media_specs": LTO_MEDIA_SPECS,
@@ -300,6 +309,25 @@ def update_drive_config(
     }
 
 
+@router.post("/drives/{drive_index}/clean")
+def clean_drive_endpoint(drive_index: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    drive = db.scalar(select(TapeDrive).where(TapeDrive.drive_index == drive_index))
+    if not drive:
+        raise HTTPException(status_code=404, detail="Drive not found.")
+    try:
+        return MSL4048HardwareManager(db).clean_drive(drive)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/drives/{drive_index}/alerts")
+def get_drive_alerts_endpoint(drive_index: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    drive = db.scalar(select(TapeDrive).where(TapeDrive.drive_index == drive_index))
+    if not drive:
+        raise HTTPException(status_code=404, detail="Drive not found.")
+    return MSL4048HardwareManager(db).check_drive_tape_alerts(drive)
+
+
 @router.post("/library/power/on")
 def power_on_library(db: Session = Depends(get_db)) -> Dict[str, Any]:
     return LibraryPowerManager(db).ensure_library_online()
@@ -316,6 +344,11 @@ def power_off_library(force: bool = False, db: Session = Depends(get_db)) -> Dic
 @router.post("/library/power/maintenance")
 def set_maintenance_lock(req: MaintenanceLockRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
     return LibraryPowerManager(db).set_maintenance_lock(req.locked)
+
+
+@router.post("/library/power/check-idle")
+def check_idle_power_off(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return check_idle_cooldown_and_auto_power_off(db)
 
 
 # ==============================================================================
@@ -735,6 +768,14 @@ def list_jobs(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
 
 @router.post("/jobs/run-archive")
 def run_archive_endpoint(req: RunArchiveBatchRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    if req.run_in_background:
+        tid = spawn_background_job(
+            lambda bg_db: TapeJobScheduler(bg_db).run_archive_batch(
+                pool_id=req.pool_id, post_archive_mode=req.post_archive_mode
+            )
+        )
+        return {"status": "started_in_background", "thread_id": tid}
+
     sched = TapeJobScheduler(db)
     try:
         return sched.run_archive_batch(pool_id=req.pool_id, post_archive_mode=req.post_archive_mode)
@@ -744,6 +785,12 @@ def run_archive_endpoint(req: RunArchiveBatchRequest, db: Session = Depends(get_
 
 @router.post("/jobs/run-restore")
 def run_restore_endpoint(req: RunRestoreBatchRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    if req.run_in_background:
+        tid = spawn_background_job(
+            lambda bg_db: TapeJobScheduler(bg_db).run_restore_batch(remonitor_in_arr=req.remonitor_in_arr)
+        )
+        return {"status": "started_in_background", "thread_id": tid}
+
     sched = TapeJobScheduler(db)
     try:
         return sched.run_restore_batch(remonitor_in_arr=req.remonitor_in_arr)
@@ -821,6 +868,18 @@ def create_catalog_backup(db: Session = Depends(get_db)) -> Dict[str, Any]:
     return CatalogBackupExporter(db).export_backup_bundle(reason="manual-webui")
 
 
+@router.get("/catalog/backups/{bundle_name}/download/{filename}")
+def download_catalog_backup_file(
+    bundle_name: str, filename: str, db: Session = Depends(get_db)
+):
+    exporter = CatalogBackupExporter(db)
+    try:
+        fpath = exporter.resolve_backup_file_path(bundle_name, filename)
+        return FileResponse(path=str(fpath), filename=filename)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 # ==============================================================================
 # 6. Settings, Sonarr/Radarr Instances, Seamless Updater & Plex Webhook
 # ==============================================================================
@@ -875,6 +934,16 @@ def sync_arr_instance(instance_id: int, db: Session = Depends(get_db)) -> Dict[s
     if not inst:
         raise HTTPException(status_code=404, detail="Instance not found.")
     return ArrService(db).sync_instance(inst)
+
+
+@router.post("/arr-instances/poll-all")
+def poll_all_arr_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return poll_all_arr_instances(db)
+
+
+@router.get("/system/database")
+def get_database_status_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return get_database_telemetry(db)
 
 
 @router.get("/system/version")
